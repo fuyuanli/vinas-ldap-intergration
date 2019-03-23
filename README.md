@@ -15,3 +15,5 @@ put following files at /usr/share/ldap-account-manager/lib/modules
 ** posixAccount.inc
 
 ** sambaGroupMapping.inc
+
+Guides are self-contained html files, so just please download them
