@@ -1,0 +1,24 @@
+dn: cn=test.user,ou=Users,dc=example,dc=com
+objectClass: top
+objectClass: organizationalPerson
+objectClass: person
+objectClass: inetOrgPerson
+objectClass: posixAccount
+objectClass: shadowAccount
+cn: test.user
+sn: user
+givenName: test
+uid: test.user
+gecos: Test User
+shadowinactive: 0
+shadowmax: 10000
+shadowmin: 1
+shadowwarning: 7
+sn: Hsiang
+uidnumber: 10000
+
+
+dn: cn=sudoers,ou=Groups,dc=example,dc=com
+objectclass: groupOfNames
+cn: sudoers
+member: cn=test.user,ou=Users,dc=example,dc=com
