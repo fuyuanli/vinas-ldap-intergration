@@ -9,6 +9,9 @@ the patch are use as it is and only test compatiblity with LAM 6.6-1
 put following files at /usr/share/ldap-account-manager/lib/modules
 
 groupOfNames.inc
+
 inetOrgPerson.inc
+
 posixAccount.inc
+
 sambaGroupMapping.inc
