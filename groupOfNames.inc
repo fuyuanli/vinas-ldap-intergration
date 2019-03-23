@@ -1,0 +1,1456 @@
+<?php
+use \LAM\TYPES\TypeManager;
+use function LAM\TYPES\getScopeFromTypeId;
+use LAM\TYPES\ConfiguredType;
+/*
+
+This code is part of LDAP Account Manager (http://www.ldap-account-manager.org/)
+Copyright (C) 2003 - 2006  Tilo Lutz
+              2007 - 2018  Roland Gruber
+
+This program is free software; you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation; either version 2 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program; if not, write to the Free Software
+Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+*/
+
+
+/**
+* Manages Unix accounts for groups.
+*
+* @package modules
+*
+* @author Tilo Lutz
+* @author Roland Gruber
+* @author Michael Duergner
+*/
+
+/**
+* Manages the object class "groupOfNames" for groups.
+*
+* @package modules
+*/
+class groupOfNames extends baseModule implements passwordService {
+
+	/** change GIDs of users and hosts? */
+	private $changegids;
+	/** password attribute */
+	protected $passwordAttrName = 'userPassword';
+	/** cache for existing GID numbers */
+	private $cachedGIDList = null;
+	/** cache for existing users and their GIDs */
+	private $cachedUserToGIDList = null;
+	/** cache for existing groups */
+	private $cachedGroupNameList = null;
+
+	/**
+	 * {@inheritDoc}
+	 * @see baseModule::getManagedAttributes()
+	 */
+	function get_uploadColumns($selectedModules, &$type) {
+		$return = parent::get_uploadColumns($selectedModules, $type);
+		$typeId = $type->getId();
+		if ($this->manageCnAndDescription($selectedModules)) {
+			array_unshift($return,
+				array(
+					'name' => 'groupOfNames_cn',
+					'description' => _('Group name'),
+					'help' => 'cn',
+					'example' => _('adminstrators'),
+					'required' => true,
+					'unique' => true
+				)
+			);
+			array_unshift($return,
+				array(
+				'name' => 'groupOfNames_description',
+				'description' => _('Group description'),
+				'help' => 'description',
+				'example' => _('Administrators group')
+				)
+			);
+		}
+		if (!$this->isBooleanConfigOptionSet('groupOfNames_' . $typeId . '_hidemember')) {
+			$return[] = array(
+				'name' => 'groupOfNames_member',
+				'description' => _('Group members'),
+				'help' => 'upload_members',
+				'example' => _('user01,user02,user03')
+			);
+		}
+		return $return;
+	}
+
+	/**
+	 * {@inheritDoc}
+	 * @see baseModule::build_uploadAccounts()
+	 */
+	function build_uploadAccounts($rawAccounts, $ids, &$partialAccounts, $selectedModules, &$type) {
+		$error_messages = array();
+		$needAutoGID = array();
+		$typeId = $type->getId();
+		for ($i = 0; $i < sizeof($rawAccounts); $i++) {
+			if (!in_array("groupOfNames", $partialAccounts[$i]['objectClass'])) $partialAccounts[$i]['objectClass'][] = "groupOfNames";
+			if ($this->manageCnAndDescription($selectedModules)) {
+				// group name
+				$this->mapSimpleUploadField($rawAccounts, $ids, $partialAccounts, $i, 'groupOfNames_cn', 'cn', 'groupname', $this->messages['cn'][3], $error_messages);
+			}
+			// GID
+			if ($rawAccounts[$i][$ids['groupOfNames_gid']] == "") {
+				// autoGID
+				$needAutoGID[] = $i;
+			}
+			elseif (get_preg($rawAccounts[$i][$ids['groupOfNames_gid']], 'digit')) {
+				$partialAccounts[$i]['gidNumber'] = $rawAccounts[$i][$ids['groupOfNames_gid']];
+			}
+			else {
+				$errMsg = $this->messages['gidNumber'][8];
+				array_push($errMsg, array($i));
+				$error_messages[] = $errMsg;
+			}
+			if ($this->manageCnAndDescription($selectedModules)) {
+				// description (UTF-8, no regex check needed)
+				if ($rawAccounts[$i][$ids['groupOfNames_description']] == "") {
+					$partialAccounts[$i]['description'] = $partialAccounts[$i]['cn'];
+				}
+				else {
+					$partialAccounts[$i]['description'] = $rawAccounts[$i][$ids['groupOfNames_description']];
+				}
+			}
+			// group members
+			if (!$this->isBooleanConfigOptionSet('groupOfNames_' . $typeId . '_hidemember') && ($rawAccounts[$i][$ids['groupOfNames_member']] != "")) {
+				if (get_preg($rawAccounts[$i][$ids['groupOfNames_member']], 'usernameList')) {
+					$partialAccounts[$i]['member'] = explode(",", $rawAccounts[$i][$ids['groupOfNames_member']]);
+				}
+				else {
+					$errMsg = $this->messages['member'][0];
+					array_push($errMsg, $i);
+					$error_messages[] =$errMsg;
+				}
+			}
+			// password
+			if ($rawAccounts[$i][$ids['groupOfNames_password']] != "") {
+				if (get_preg($rawAccounts[$i][$ids['groupOfNames_password']], 'password')) {
+					$partialAccounts[$i][$this->passwordAttrName] = pwd_hash($rawAccounts[$i][$ids['groupOfNames_password']], true, $this->moduleSettings['posixAccount_pwdHash'][0]);
+				}
+				else {
+					$error_messages[] = $this->messages['userPassword'][1];
+				}
+			}
+		}
+		// fill in autoGIDs
+		if (sizeof($needAutoGID) > 0) {
+			$errorsTemp = array();
+			$gids = $this->getNextGIDs(sizeof($needAutoGID), $errorsTemp, $type);
+			if (is_array($gids)) {
+				for ($i = 0; $i < sizeof($needAutoGID); $i++) {
+					$partialAccounts[$i]['gidNumber'] = $gids[$i];
+				}
+			}
+			else {
+				$error_messages[] = $this->messages['gidNumber'][2];
+			}
+		}
+		return $error_messages;
+	}
+
+	/**
+	* Checks if the group which should be deleted is still used as primary group.
+	*
+	* @return List of LDAP operations, same as for save_attributes()
+	*/
+	function delete_attributes() {
+		$return = array();
+		$result = searchLDAPByFilter('(&(objectClass=posixAccount)(gidNumber=' . $this->attributes['gidNumber'][0] . '))', array('dn'), array('user', 'host'));
+		if (sizeof($result) > 0) {
+			$max = 5;
+			if (sizeof($result) < 5) {
+				$max = sizeof($result);
+			}
+			$users = array();
+			for ($i = 0; $i < $max; $i++) {
+				$users[] = getAbstractDN($result[$i]['dn']);
+			}
+			$message = $this->messages['primaryGroup'][0];
+			$message[] = implode(', ', $users);
+			$return[$this->getAccountContainer()->dn_orig]['errors'][] = $message;
+		}
+		return $return;
+	}
+
+	/**
+	 * Returns the HTML meta data for the main account page.
+	 *
+	 * @return array HTML meta data
+	 *
+	 * @see baseModule::get_metaData()
+	 */
+	function display_html_attributes() {
+		$return = new htmlTable();
+		$modules = $this->getAccountContainer()->get_type()->getModules();
+		$typeId = $this->getAccountContainer()->get_type()->getId();
+		if ($this->autoAddObjectClasses || (isset($this->attributes['objectClass']) && in_array('groupOfNames', $this->attributes['objectClass']))) {
+			// auto sync group members
+			if ($this->isBooleanConfigOptionSet('groupOfNames_autoSyncGon')) {
+				$this->syncGon();
+			}
+			// group name
+			if ($this->manageCnAndDescription($modules)) {
+				$cn = '';
+				if (isset($this->attributes['cn'][0])) {
+					$cn = $this->attributes['cn'][0];
+				}
+				$cnInput = new htmlTableExtendedInputField(_("Group name"), 'cn', $cn, 'cn');
+				$cnInput->setRequired(true);
+				$cnInput->setFieldMaxLength(100);
+				$return->addElement($cnInput, true);
+			}
+			// GID number
+			$gidNumber = '';
+			if (isset($this->attributes['gidNumber'][0])) {
+				$gidNumber = $this->attributes['gidNumber'][0];
+			}
+			$gidNumberInput = new htmlTableExtendedInputField(_('GID number'), 'gidNumber', $gidNumber, 'gidNumber');
+			$gidNumberInput->setFieldMaxLength(20);
+			$gidNumberInput->setValidationRule(htmlElement::VALIDATE_NUMERIC);
+			$return->addElement($gidNumberInput, true);
+			// description
+			$description = '';
+			if (isset($this->attributes['description'][0])) {
+				$description = $this->attributes['description'][0];
+			}
+			if ($this->manageCnAndDescription($modules)) {
+				$return->addElement(new htmlTableExtendedInputField(_('Description'), 'description', $description, 'description'), true);
+			}
+			// password buttons
+			if (checkIfWriteAccessIsAllowed($this->get_scope()) && isset($this->attributes[$this->passwordAttrName][0])) {
+				$return->addElement(new htmlOutputText(_('Password')));
+				$pwdContainer = new htmlTable();
+				if (pwd_is_enabled($this->attributes[$this->passwordAttrName][0])) {
+					$pwdContainer->addElement(new htmlButton('lockPassword', _('Lock password')));
+				}
+				else {
+					$pwdContainer->addElement(new htmlButton('unlockPassword', _('Unlock password')));
+				}
+				$pwdContainer->addElement(new htmlButton('removePassword', _('Remove password')));
+				$pwdContainer->colspan = 2;
+				$return->addElement($pwdContainer, true);
+			}
+			if (isset($this->orig['gidNumber'][0]) && $this->attributes['gidNumber'][0]!=$this->orig['gidNumber'][0]) {
+				$return->addElement(new htmlTableExtendedInputCheckbox('changegids', $this->changegids, _('Change GID number of users and hosts'), 'changegids'), true);
+			}
+			// group members
+			if (!$this->isBooleanConfigOptionSet('groupOfNames_' . $typeId . '_hidemember')) {
+				$return->addElement(new htmlOutputText(_("Group members")));
+				if (!$this->isBooleanConfigOptionSet('groupOfNames_autoSyncGon')) {
+					$return->addElement(new htmlAccountPageButton(get_class($this), 'user', 'open', _('Edit members')));
+				}
+				else {
+					$return->addElement(new htmlOutputText(''));
+				}
+				$return->addElement(new htmlHelpLink('members'), true);
+				$return->addElement(new htmlOutputText(''));
+				$users = $this->getUsers();
+				$members = array();
+				if (isset($this->attributes['member'][0])) {
+					foreach ($this->attributes['member'] as $uid) {
+						if (isset($users[$uid]) && isset($users[$uid]['cn'])) {
+							$members[] = $uid . ' (' . $users[$uid]['cn'] . ')';
+						}
+						else {
+							$members[] = $uid;
+						}
+					}
+				}
+				$members = array_unique($members);
+				natcasesort($members);
+				$members = array_map('htmlspecialchars', $members);
+				$return->addElement(new htmlOutputText(implode('<br>', $members), false), true);
+			}
+			// remove button
+			if (!$this->autoAddObjectClasses) {
+				$return->addElement(new htmlSpacer(null, '20px'), true);
+				$remButton = new htmlButton('remObjectClass', _('Remove Unix extension'));
+				$remButton->colspan = 5;
+				$return->addElement($remButton);
+			}
+		}
+		else {
+			// add button
+			$return->addElement(new htmlButton('addObjectClass', _('Add Unix extension')));
+		}
+		return $return;
+	}
+
+
+	/**
+	* Displays selections to add or remove users from current group.
+	*
+	* @return array meta HTML output
+	*/
+	function display_html_user() {
+		$return = new htmlTable();
+		$filter = '';
+		if (isset($_POST['setFilter'])) {
+			$filter = $_POST['newFilter'];
+		}
+		if (!isset($this->attributes['member'])) {
+			$this->attributes['member'] = array();
+		}
+		// load list with all users
+		$userAndGIDs = $this->getUsers();
+		$users = array();
+		foreach ($userAndGIDs as $user => $userAttrs) {
+			if (!in_array($user, $this->attributes['member'])) {
+				print_r($userAttrs);
+				$display = $user . ' (' . $userAttrs['cn'] . ')';
+
+				if (!empty($filter) && !preg_match('/' . str_replace('*', '.*', $filter) . '/ui', $display)) {
+					continue;
+				}
+				if ($this->attributes['gidNumber'][0] == $userAttrs['gid']) {
+					if (isset($this->moduleSettings['posixAccount_primaryGroupAsSecondary'][0])
+						&& ($this->moduleSettings['posixAccount_primaryGroupAsSecondary'][0] == 'true')) {
+							$users[$display] = $userAttrs['dn'];
+					}
+				}
+				else {
+					$users[$display] = $userAttrs['dn'];
+				}
+			}
+		}
+		print_r($users);
+		$return->addElement(new htmlSubTitle(_("Group members")), true);
+
+		$return->addElement(new htmlOutputText(_("Selected users")));
+		$return->addElement(new htmlOutputText(''));
+		$return->addElement(new htmlOutputText(_("Available users")));
+		$return->addNewLine();
+
+		$remUsers = array();
+		if (isset($this->attributes['member'])) {
+			$remUsers = $this->attributes['member'];
+		}
+		$remUsersDescriptive = array();
+		foreach ($remUsers as $user) {
+			if (isset($userAndGIDs[$user])) {
+				$remUsersDescriptive[$user . ' (' . $userAndGIDs[$user]['cn'] . ')'] = $user;
+			}
+			else {
+				$remUsersDescriptive[$user] = $user;
+			}
+		}
+		$remSelect = new htmlSelect('removeusers', $remUsersDescriptive, null, 15);
+		$remSelect->setMultiSelect(true);
+		$remSelect->setTransformSingleSelect(false);
+		$remSelect->setHasDescriptiveElements(true);
+		$return->addElement($remSelect);
+		$buttonContainer = new htmlTable();
+		$buttonContainer->addElement(new htmlButton('addusers_button', 'back.gif', true), true);
+		$buttonContainer->addElement(new htmlButton('removeusers_button', 'forward.gif', true), true);
+		$buttonContainer->addElement(new htmlHelpLink('members'));
+		$return->addElement($buttonContainer);
+		$addSelect = new htmlSelect('addusers', $users, null, 15);
+		$addSelect->setMultiSelect(true);
+		$addSelect->setTransformSingleSelect(false);
+		$addSelect->setHasDescriptiveElements(true);
+		$return->addElement($addSelect);
+		$return->addNewLine();
+		$return->addElement(new htmlOutputText(''));
+		$return->addElement(new htmlOutputText(''));
+		$filterContainer = new htmlGroup();
+		$filterInput = new htmlInputField('newFilter', $filter, 10);
+		$filterInput->setOnKeyPress('SubmitForm(\'setFilter\', event);');
+		$filterContainer->addElement($filterInput);
+		$filterContainer->addElement(new htmlButton('setFilter', _('Filter')));
+		$filterContainer->addElement(new htmlHelpLink('filter'));
+		$filterContainer->addElement(new htmlHiddenInput('filterValue', htmlspecialchars($filter)));
+		$return->addElement($filterContainer, true);
+
+		// sync from group of names
+		$gon = $this->getAccountContainer()->getAccountModule('groupOfNames');
+		if ($gon == null) {
+			$gon = $this->getAccountContainer()->getAccountModule('groupOfUniqueNames');
+		}
+		if ($gon != null) {
+			$return->addElement(new htmlSpacer(null, '20px'), true);
+			$syncGroup = new htmlTable();
+			$syncGroup->colspan = 5;
+			$syncButton = new htmlButton('syncGON', sprintf(_('Sync from %s'), $gon->get_alias()));
+			$syncButton->setIconClass('refreshButton');
+			$syncGroup->addElement($syncButton);
+			$syncGroup->addSpace('2rem');
+			$syncGroup->addElement(new htmlTableExtendedInputCheckbox('syncGON_delete', true, _('Delete non-matching entries'), null, false));
+			$return->addElement($syncGroup, true);
+		}
+		$windows = $this->getAccountContainer()->getAccountModule('windowsGroup');
+		if ($windows != null) {
+			$return->addElement(new htmlSpacer(null, '20px'), true);
+			$syncGroup = new htmlTable();
+			$syncGroup->colspan = 5;
+			$syncButton = new htmlButton('syncWindows', sprintf(_('Sync from %s'), $windows->get_alias()));
+			$syncButton->setIconClass('refreshButton');
+			$syncGroup->addElement($syncButton);
+			$syncGroup->addSpace('2rem');
+			$syncGroup->addElement(new htmlTableExtendedInputCheckbox('syncWindows_delete', true, _('Delete non-matching entries'), null, false));
+			$return->addElement($syncGroup, true);
+		}
+
+		// back button
+		$return->addElement(new htmlSpacer(null, '20px'), true);
+		$return->addElement(new htmlAccountPageButton(get_class($this), 'attributes', 'back', _('Back')), true);
+		$return->addElement(new htmlEqualHeight(array('removeusers', 'addusers')));
+
+		return $return;
+	}
+
+	/**
+	* Returns true if this module can manage accounts of the current type, otherwise false.
+	*
+	* @return boolean true if module fits
+	*/
+	public function can_manage() {
+		return in_array($this->get_scope(), array('group'));
+	}
+
+	/**
+	* Returns meta data that is interpreted by parent class
+	*
+	* @return array array with meta data
+	*/
+	function get_metaData() {
+		$return = array();
+		// icon
+		$return['icon'] = 'tux.png';
+		if ($this->get_scope() == "group") {
+			// this is a base module
+			$return["is_base"] = true;
+			// LDAP filter
+			$return["ldap_filter"] = array('or' => "(objectClass=groupOfNames)");
+		}
+		// alias name
+		$return["alias"] = _('Unix');
+		// RDN attribute
+		$return["RDN"] = array("cn" => "normal");
+		// module dependencies
+		$return['dependencies'] = array('depends' => array(), 'conflicts' => array());
+		// managed object classes
+		$return['objectClasses'] = array('groupOfNames');
+		// LDAP aliases
+		$return['LDAPaliases'] = array('commonName' => 'cn');
+		// managed attributes
+		$return['attributes'] = array('gidNumber', $this->passwordAttrName, 'member');
+		// profile options
+		if (!$this->autoAddObjectClasses) {
+			$profileContainer = new htmlResponsiveRow();
+			$profileContainer->add(new htmlResponsiveInputCheckbox('groupOfNames_addExt', false, _('Automatically add this extension'), 'autoAdd'), 12);
+			$return['profile_options'] = $profileContainer;
+		}
+		// available PDF fields
+		$return['PDF_fields'] = array(
+			'gidNumber' => _('GID number'),
+		);
+		// upload fields
+		$return['upload_columns'] = array(
+		array(
+			'name' => 'groupOfNames_gid',
+			'description' => _('GID number'),
+			'help' => 'gidNumber',
+			'example' => '2034'
+		),
+		array(
+			'name' => 'groupOfNames_password',
+			'description' => _('Group password'),
+			'help' => 'password',
+			'example' => _('secret')
+		)
+		);
+		// help Entries
+		$return['help'] = array(
+			'gidNumber'	=> array(
+				"Headline" => _("GID number"), 'attr' => 'gidNumber',
+				"Text" => _("If empty GID number will be generated automaticly depending on your configuration settings.")
+			),
+			'description' => array(
+				"Headline" => _("Description"), 'attr' => 'description',
+				"Text" => _("Group description. If left empty group name will be used.")
+			),
+			'members' => array(
+				"Headline" => _("Group members"), 'attr' => 'member',
+				"Text" => _("Users who are member of the current group. Users who have set their primary group to this group will not be shown.")
+			),
+			'upload_members' => array(
+				"Headline" => _("Group members"), 'attr' => 'member',
+				"Text" => _("Users who will become member of the current group. User names are separated by semicolons.")
+			),
+			'password' => array(
+				"Headline" => _("Group password"), 'attr' => $this->passwordAttrName,
+				"Text" => _("Sets the group password.")
+			),
+			'minMaxGID' => array(
+				"Headline" => _("GID number"),
+				"Text" => _("These are the minimum and maximum numbers to use for group IDs when creating new group accounts. New group accounts will always get the highest number in use plus one.")
+			),
+			'pwdHash' => array(
+				"Headline" => _("Password hash type"),
+				"Text" => _("LAM supports CRYPT, CRYPT-SHA512, SHA, SSHA, MD5 and SMD5 to generate the hash value of passwords. SSHA and CRYPT are the most common but CRYPT does not support passwords greater than 8 letters. We do not recommend to use plain text passwords.")
+			),
+			'cn' => array(
+				"Headline" => _("Group name"), 'attr' => 'cn',
+				"Text" => _("Group name of the group which should be created. Valid characters are: a-z, A-Z, 0-9 and .-_ . If group name is already used group name will be expanded with a number. The next free number will be used.")
+			),
+			'changegids' => array(
+				"Headline" => _("Change GID number of users and hosts"),
+				"Text" => _("The ID of this group was changed. You can update all user and host entries to the new group ID.")
+			),
+			'gidCheckSuffix' => array (
+				"Headline" => _("Suffix for GID/group name check"),
+				"Text" => _("LAM checks if the entered group name and GID are unique. Here you can enter the LDAP suffix that is used to search for duplicates. By default the account type suffix is used. You only need to change this if you use multiple server profiles with different OUs but need unique group names or GIDs.")
+			),
+			'gidGenerator' => array (
+				"Headline" => _("GID generator"),
+				"Text" => _("LAM will automatically suggest UID/GID numbers. You can either use a fixed range of numbers or an LDAP entry with object class \"sambaUnixIdPool\" or \"msSFU30DomainInfo\".")
+					. ' ' . _('Magic number will set a fixed value that must match your server configuration.')
+			),
+			'sambaIDPoolDN' => array (
+				"Headline" => _("Samba ID pool DN"),
+				"Text" => _("Please enter the DN of the LDAP entry with object class \"sambaUnixIdPool\".")
+			),
+			'windowsIDPoolDN' => array (
+				"Headline" => _("Windows domain info DN"),
+				"Text" => _("Please enter the DN of the LDAP entry with object class \"msSFU30DomainInfo\".")
+			),
+			'filter' => array(
+				"Headline" => _("Filter"),
+				"Text" => _("Here you can enter a filter value. Only entries which contain the filter text will be shown.")
+					. ' ' . _('Possible wildcards are: "*" = any character, "^" = line start, "$" = line end')
+			),
+			'hidemember' => array(
+				"Headline" => _('Disable membership management'), 'attr' => 'member',
+				"Text" => _('Disables the group membership management.')
+			),
+			'autoAdd' => array(
+				"Headline" => _("Automatically add this extension"),
+				"Text" => _("This will enable the extension automatically if this profile is loaded.")
+			),
+			'autoSyncGon' => array(
+				"Headline" => _("Force sync with group of names"),
+				"Text" => _("This will force syncing with group of names members of the same group.")
+			),
+			'magicNumber' => array(
+				"Headline" => _("Magic number"),
+				"Text" => _("Please enter the magic number you configured on server side.")
+			),
+		);
+
+		return $return;
+	}
+
+
+	/**
+	 * {@inheritDoc}
+	 * @see baseModule::get_configOptions()
+	 */
+	public function get_configOptions($scopes, $allScopes) {
+		$typeManager = new TypeManager($_SESSION['conf_config']);
+		// configuration options
+		$configContainer = new htmlResponsiveRow();
+		$configContainer->add(new htmlSubTitle(_("Groups")), 12);
+		$genOptions = array(
+			_('Fixed range') => 'range',
+			_('Samba ID pool') => 'sambaPool',
+			_('Windows domain info') => 'windowsDomain',
+			_('Magic number') => 'magicNumber'
+		);
+		foreach ($allScopes[get_class($this)] as $typeId) {
+			if (sizeof($allScopes[get_class($this)]) > 1) {
+				$title = new htmlDiv(null, new htmlOutputText($typeManager->getConfiguredType($typeId)->getAlias()));
+				$title->setCSSClasses(array('bold', 'responsiveLabel'));
+				$configContainer->add($title, 12, 6);
+				$configContainer->add(new htmlOutputText('&nbsp;', false), 0, 6);
+			}
+			$gidGeneratorSelect = new htmlResponsiveSelect('groupOfNames_' . $typeId . '_gidGenerator', $genOptions, array('range'), _('GID generator'), 'gidGenerator');
+			$gidGeneratorSelect->setHasDescriptiveElements(true);
+			$gidGeneratorSelect->setTableRowsToHide(array(
+				'range' => array('groupOfNames_' . $typeId . '_sambaIDPoolDN', 'groupOfNames_' . $typeId . '_windowsIDPoolDN', 'groupOfNames_' . $typeId . '_magicNumber'),
+				'sambaPool' => array('groupOfNames_' . $typeId . '_minGID', 'groupOfNames_' . $typeId . '_maxGID', 'groupOfNames_' . $typeId . '_windowsIDPoolDN', 'groupOfNames_' . $typeId . '_magicNumber'),
+				'windowsDomain' => array('groupOfNames_' . $typeId . '_minGID', 'groupOfNames_' . $typeId . '_maxGID', 'groupOfNames_' . $typeId . '_sambaIDPoolDN', 'groupOfNames_' . $typeId . '_magicNumber'),
+				'magicNumber' => array('groupOfNames_' . $typeId . '_minGID', 'groupOfNames_' . $typeId . '_maxGID', 'groupOfNames_' . $typeId . '_windowsIDPoolDN', 'groupOfNames_' . $typeId . '_sambaIDPoolDN')
+			));
+			$gidGeneratorSelect->setTableRowsToShow(array(
+				'range' => array('groupOfNames_' . $typeId . '_minGID', 'groupOfNames_' . $typeId . '_maxGID'),
+				'sambaPool' => array('groupOfNames_' . $typeId . '_sambaIDPoolDN'),
+				'windowsDomain' => array('groupOfNames_' . $typeId . '_windowsIDPoolDN'),
+				'magicNumber' => array('groupOfNames_' . $typeId . '_magicNumber')
+			));
+			$configContainer->add($gidGeneratorSelect, 12);
+			$minGidInput = new htmlResponsiveInputField(_('Minimum GID number'), 'groupOfNames_' . $typeId . '_minGID', null, 'minMaxGID');
+			$minGidInput->setRequired(true);
+			$configContainer->add($minGidInput, 12);
+			$maxGidInput = new htmlResponsiveInputField(_('Maximum GID number'), 'groupOfNames_' . $typeId . '_maxGID', null, 'minMaxGID');
+			$maxGidInput->setRequired(true);
+			$configContainer->add($maxGidInput, 12);
+			$gidGeneratorDN = new htmlResponsiveInputField(_('Samba ID pool DN'), 'groupOfNames_' . $typeId . '_sambaIDPoolDN', null, 'sambaIDPoolDN');
+			$gidGeneratorDN->setRequired(true);
+			$configContainer->add($gidGeneratorDN, 12);
+			$winGeneratorDN = new htmlResponsiveInputField(_('Windows domain info DN'), 'groupOfNames_' . $typeId . '_windowsIDPoolDN', null, 'windowsIDPoolDN');
+			$winGeneratorDN->setRequired(true);
+			$configContainer->add($winGeneratorDN, 12);
+			$magicNumber = new htmlResponsiveInputField(_('Magic number'), 'groupOfNames_' . $typeId . '_magicNumber', null, 'magicNumber');
+			$magicNumber->setRequired(true);
+			$configContainer->add($magicNumber, 12);
+			$configContainer->add(new htmlResponsiveInputField(_('Suffix for GID/group name check'), 'groupOfNames_' . $typeId . '_gidCheckSuffix', '', 'gidCheckSuffix'), 12);
+			$configContainer->add(new htmlResponsiveInputCheckbox('groupOfNames_' . $typeId . '_hidemember', false, _('Disable membership management'), 'hidemember'), 12);
+			$configContainer->addVerticalSpacer('2rem');
+		}
+		$gonModules = array('groupOfNames', 'groupOfUniqueNames');
+		$gonFound = false;
+		foreach ($gonModules as $gonModule) {
+			if (!empty($allScopes[$gonModule])) {
+				foreach ($allScopes[$gonModule] as $gonTypeId) {
+					if (getScopeFromTypeId($gonTypeId) === 'group') {
+						$gonFound = true;
+					}
+				}
+			}
+		}
+		if ($gonFound || !isset($allScopes['posixAccount'])) {
+			$configContainer->add(new htmlSubTitle(_("Options")), 12);
+		}
+		if ($gonFound) {
+			$configContainer->add(new htmlResponsiveInputCheckbox('groupOfNames_autoSyncGon', false, _('Force sync with group of names'), 'autoSyncGon'), 12);
+		}
+		// display password hash option only if posixAccount module is not used
+		if (!isset($allScopes['posixAccount'])) {
+			$configContainer->add(new htmlResponsiveSelect('posixAccount_pwdHash', getSupportedHashTypes(), array('SSHA'), _("Password hash type"), 'pwdHash'), 12);
+		}
+		return $configContainer;
+	}
+
+	/**
+	 * {@inheritDoc}
+	 * @see baseModule::check_configOptions()
+	 */
+	public function check_configOptions($typeIds, &$options) {
+		foreach ($typeIds as $typeId) {
+			if ($options['groupOfNames_' . $typeId . '_gidGenerator'][0] == 'range') {
+				$this->meta['config_checks']['group']['groupOfNames_' . $typeId . '_minGID'] = array (
+					'type' => 'ext_preg',
+					'regex' => 'digit',
+					'required' => true,
+					'required_message' => $this->messages['gidNumber'][5],
+					'error_message' => $this->messages['gidNumber'][5]);
+				$this->meta['config_checks']['group']['groupOfNames_' . $typeId . '_maxGID'] = array (
+					'type' => 'ext_preg',
+					'regex' => 'digit',
+					'required' => true,
+					'required_message' => $this->messages['gidNumber'][6],
+					'error_message' => $this->messages['gidNumber'][6]);
+				$this->meta['config_checks']['group']['cmpGID'] = array (
+					'type' => 'int_greater',
+					'cmp_name1' => 'groupOfNames_' . $typeId . '_maxGID',
+					'cmp_name2' => 'groupOfNames_' . $typeId . '_minGID',
+					'error_message' => $this->messages['gidNumber'][7]);
+			}
+			elseif ($options['groupOfNames_' . $typeId . '_gidGenerator'][0] == 'sambaPool') {
+				$this->meta['config_checks']['group']['groupOfNames_' . $typeId . '_sambaIDPoolDN'] = array (
+					'type' => 'ext_preg',
+					'regex' => 'dn',
+					'required' => true,
+					'required_message' => $this->messages['sambaIDPoolDN'][0],
+					'error_message' => $this->messages['sambaIDPoolDN'][0]);
+			}
+			elseif ($options['groupOfNames_' . $typeId . '_gidGenerator'][0] == 'windowsDomain') {
+				$this->meta['config_checks']['group']['groupOfNames_' . $typeId . '_windowsIDPoolDN'] = array (
+					'type' => 'ext_preg',
+					'regex' => 'dn',
+					'required' => true,
+					'required_message' => $this->messages['windowsIDPoolDN'][0],
+					'error_message' => $this->messages['windowsIDPoolDN'][0]);
+			}
+			elseif ($options['groupOfNames_' . $typeId . '_gidGenerator'][0] == 'magicNumber') {
+				$this->meta['config_checks']['group']['groupOfNames_' . $typeId . '_magicNumber'] = array (
+					'type' => 'ext_preg',
+					'regex' => 'digit',
+					'required' => true,
+					'required_message' => $this->messages['magicNumber'][0],
+					'error_message' => $this->messages['magicNumber'][0]);
+			}
+		}
+		return parent::check_configOptions($typeIds, $options);
+	}
+
+	/**
+	 * {@inheritDoc}
+	 * @see baseModule::get_pdfFields()
+	 */
+	public function get_pdfFields($typeId) {
+		$fields = parent::get_pdfFields($typeId);
+		$typeManager = new TypeManager();
+		$modules = $typeManager->getConfiguredType($typeId)->getModules();
+		if ($this->manageCnAndDescription($modules)) {
+			$fields['cn'] = _('Group name');
+			$fields['description'] = _('Description');
+		}
+		if (!$this->isBooleanConfigOptionSet('groupOfNames_' . $typeId . '_hidemember')) {
+			$fields['member'] = _('Group members');
+			$fields['memberUidPrimary'] = _('Group members (incl. primary members)');
+		}
+		return $fields;
+	}
+
+	/**
+	 * {@inheritDoc}
+	 * @see baseModule::get_pdfEntries()
+	 */
+	function get_pdfEntries($pdfKeys, $typeId) {
+		$return = array();
+		$this->addSimplePDFField($return, 'member', _('Group members'));
+		$this->addSimplePDFField($return, 'cn', _('Group name'));
+		$this->addSimplePDFField($return, 'gidNumber', _('GID number'));
+		$this->addSimplePDFField($return, 'description', _('Description'));
+		if (in_array(get_class($this) . '_memberUidPrimary', $pdfKeys)) {
+			$members = !empty($this->attributes['member']) ? $this->attributes['member'] : array();
+			if (!empty($this->attributes['gidNumber'])) {
+				$filter = "(&(&" . get_ldap_filter('user')  . ")(gidNumber=" . $this->attributes['gidNumber'][0] . "))";
+				$entries = searchLDAPByFilter($filter, array('uid'), array('user'));
+				foreach ($entries as $entry) {
+					$members[] = $entry['uid'][0];
+				}
+			}
+			$this->addPDFKeyValue($return, 'memberUidPrimary', _('Group members'), $members);
+		}
+		return $return;
+	}
+
+
+	/**
+	* This functin will be called when the module will be loaded
+	*
+	* @param String $base the name of the {@link accountContainer} object ($_SESSION[$base])
+	*/
+	function init($base) {
+		// call parent init
+		parent::init($base);
+		$this->changegids=false;
+	}
+
+
+	/**
+	* This function fills the $messages variable with output messages from this module.
+	*/
+	function load_Messages() {
+		$this->messages['userPassword'][1] = array('ERROR', _('Password'), _('Password contains invalid characters. Valid characters are:') . ' a-z, A-Z, 0-9 and #*,.;:_-+!%&/|?{[()]}=@$ §°!');
+		$this->messages['gidNumber'][0] = array('INFO', _('GID number'), _('GID number has changed. Please select checkbox to change GID number of users and hosts.'));
+		$this->messages['gidNumber'][2] = array('WARN', _('ID-Number'), _('It is possible that this ID-number is reused. This can cause several problems because files with old permissions might still exist. To avoid this warning set maxUID to a higher value.'));
+		$this->messages['gidNumber'][3] = array('ERROR', _('ID-Number'), _('No free ID-Number!'));
+		$this->messages['gidNumber'][4] = array('ERROR', _('ID-Number'), _('ID is already in use'));
+		$this->messages['gidNumber'][5] = array('ERROR', _('Minimum GID number'), _('Minimum GID number is invalid or empty!'));
+		$this->messages['gidNumber'][6] = array('ERROR', _('Maximum GID number'), _('Maximum GID number is invalid or empty!'));
+		$this->messages['gidNumber'][7] = array('ERROR', _('Maximum GID number'), _('Maximum GID number must be greater than minimum GID number!'));
+		$this->messages['gidNumber'][8] = array('ERROR', _('Account %s:') . ' groupOfNames_gid', _('GID number has to be a numeric value!'));
+		$this->messages['cn'][0] = array('WARN', _('Group name'), _('You are using capital letters. This can cause problems because Windows is not case-sensitive.'));
+		$this->messages['cn'][1] = array('WARN', _('Group name'), _('Group name in use. Selected next free group name.'));
+		$this->messages['cn'][2] = array('ERROR', _('Group name'), _('Group name contains invalid characters. Valid characters are: a-z, A-Z, 0-9 and .-_ !'));
+		$this->messages['cn'][3] = array('ERROR', _('Account %s:') . ' groupOfNames_cn', _('Group name contains invalid characters. Valid characters are: a-z, A-Z, 0-9 and .-_ !'));
+		$this->messages['member'][0] = array('ERROR', _('Account %s:') . ' groupOfNames_member', _("This value must be a list of user names separated by semicolons."));
+		$this->messages['primaryGroup'][0] = array('ERROR', _('There are still users who have this group as their primary group.'));
+		$this->messages['sambaIDPoolDN'][0] = array('ERROR', _('Samba ID pool DN'), _('This is not a valid DN!'));
+		$this->messages['windowsIDPoolDN'][0] = array('ERROR', _('Windows domain info DN'), _('This is not a valid DN!'));
+		$this->messages['magicNumber'][0] = array('ERROR', _('Magic number'), _('Please enter a valid number.'));
+	}
+
+
+	/**
+	 * {@inheritDoc}
+	 * @see baseModule::getManagedAttributes()
+	 */
+	public function getManagedAttributes($typeId) {
+		$attrs = parent::getManagedAttributes($typeId);
+		$typeManager = new TypeManager();
+		$modules = $typeManager->getConfiguredType($typeId)->getModules();
+		if ($this->manageCnAndDescription($modules)) {
+			$attrs[] = 'cn';
+			$attrs[] = 'description';
+		}
+		return $attrs;
+	}
+
+	/**
+	* This functions is used to check if all settings for this module have been made.
+	*
+	* @return boolean true, if settings are complete
+	*/
+	function module_complete() {
+		if (!$this->getAccountContainer()->isNewAccount) {
+			// check if account is based on our object class
+			$objectClasses = $this->getAccountContainer()->attributes_orig['objectClass'];
+			if (is_array($objectClasses) && !in_array('groupOfNames', $objectClasses)) {
+				return true;
+			}
+		}
+		$modules = $this->getAccountContainer()->get_type()->getModules();
+		if ($this->manageCnAndDescription($modules) && ($this->attributes['cn'][0] == '')) {
+			return false;
+		}
+		if ((!isset($this->attributes['gidNumber'][0])) || $this->attributes['gidNumber'][0] === '') {
+			return false;
+		}
+		return true;
+	}
+
+
+	/**
+	* Controls if the module button the account page is visible and activated.
+	*
+	* @return string status ("enabled", "disabled", "hidden")
+	*/
+	function getButtonStatus() {
+		if (!$this->getAccountContainer()->isNewAccount) {
+			// check if account is based on our object class
+			$objectClasses = $this->getAccountContainer()->attributes_orig['objectClass'];
+			if (is_array($objectClasses) && !in_array('groupOfNames', $objectClasses)) {
+				return "disabled";
+			}
+		}
+		return "enabled";
+	}
+
+
+	/**
+	* Processes user input of the primary module page.
+	* It checks if all input values are correct and updates the associated LDAP attributes.
+	*
+	* @return array list of info/error messages
+	*/
+	function process_attributes() {
+		$errors = array();
+		if (isset($_POST['addObjectClass'])) {
+			if (!isset($this->attributes['objectClass'])) {
+				$this->attributes['objectClass'] = array();
+			}
+			if (!in_array('groupOfNames', $this->attributes['objectClass'])) {
+				$this->attributes['objectClass'][] = 'groupOfNames';
+			}
+			return $errors;
+		}
+		if (isset($_POST['remObjectClass'])) {
+			$this->attributes['objectClass'] = array_delete(array('groupOfNames'), $this->attributes['objectClass']);
+			$attrs = $this->getManagedAttributes($this->getAccountContainer()->get_type()->getId());
+			foreach ($attrs as $name) {
+				if (isset($this->attributes[$name])) {
+					unset($this->attributes[$name]);
+				}
+			}
+			return $errors;
+		}
+		$modules = $this->getAccountContainer()->get_type()->getModules();
+		$typeId = $this->getAccountContainer()->get_type()->getId();
+		// skip processing if object class is not set
+		if (!$this->autoAddObjectClasses && (!isset($this->attributes['objectClass']) || !in_array('groupOfNames', $this->attributes['objectClass']))) {
+			return $errors;
+		}
+		if ($this->manageCnAndDescription($modules)) {
+			$this->attributes['description'][0] = $_POST['description'];
+		}
+		if (isset($_POST['lockPassword'])) {
+			$this->attributes[$this->passwordAttrName][0] = pwd_disable($this->attributes[$this->passwordAttrName][0]);
+		}
+		if (isset($_POST['unlockPassword'])) {
+			$this->attributes[$this->passwordAttrName][0] = pwd_enable($this->attributes[$this->passwordAttrName][0]);
+		}
+		if (isset($_POST['removePassword'])) {
+			unset($this->attributes[$this->passwordAttrName]);
+		}
+		if (isset($_POST['changegids'])) $this->changegids=true;
+		else $this->changegids=false;
+		if (!isset($this->attributes['gidNumber'][0]) || ($this->attributes['gidNumber'][0] != $_POST['gidNumber'])) {
+			// Check if GID is valid. If none value was entered, the next useable value will be inserted
+			// load min and max GID number
+			$minID = intval($this->moduleSettings['groupOfNames_' . $typeId . '_minGID'][0]);
+			$maxID = intval($this->moduleSettings['groupOfNames_' . $typeId . '_maxGID'][0]);
+			$this->attributes['gidNumber'][0] = $_POST['gidNumber'];
+			if ($this->attributes['gidNumber'][0] == '') {
+				// No id-number given, find free GID
+				if (!isset($this->orig['gidNumber'][0])) {
+					$newGID = $this->getNextGIDs(1, $errors, $this->getAccountContainer()->get_type());
+					if (is_array($newGID)) {
+						$this->attributes['gidNumber'][0] = $newGID[0];
+					}
+					else {
+						$errors[] = $this->messages['gidNumber'][3];
+					}
+				}
+				else $this->attributes['gidNumber'][0] = $this->orig['gidNumber'][0];
+				// old account -> return id-number which has been used
+			}
+			else {
+				$gids = $this->getGIDs($this->getAccountContainer()->get_type());
+				// Check manual ID
+				if ($this->getAccountContainer()->isNewAccount || !isset($this->orig['gidNumber'][0]) || ($this->orig['gidNumber'][0] != $this->attributes['gidNumber'][0])) {
+					// check range
+					if ($this->moduleSettings['groupOfNames_' . $typeId . '_gidGenerator'][0] == 'range') {
+						if (($this->attributes['gidNumber'][0] < $minID) || ($this->attributes['gidNumber'][0] > $maxID) || !is_numeric($this->attributes['gidNumber'][0])) {
+							$errors[] = array('ERROR', _('ID-Number'), sprintf(_('Please enter a value between %s and %s!'), $minID, $maxID));
+							if (isset($this->orig['gidNumber'][0])) $this->attributes['gidNumber'][0] = $this->orig['gidNumber'][0];
+							else unset($this->attributes['gidNumber'][0]);
+						}
+					}
+					// $uids is allways an array but not if no entries were found
+					if (is_array($gids)) {
+						// id-number is in use and account is a new account
+						if ((in_array($this->attributes['gidNumber'][0], $gids)) && $this->orig['gidNumber'][0]=='') {
+							$errors[] = $this->messages['gidNumber'][4];
+							unset($this->attributes['gidNumber'][0]);
+						}
+						// id-number is in use, account is existing account and id-number is not used by itself
+						if ((in_array($this->attributes['gidNumber'][0], $gids)) && $this->orig['gidNumber'][0]!='' && ($this->orig['gidNumber'][0] != $this->attributes['gidNumber'][0]) ) {
+							$errors[] = $this->messages['gidNumber'][4];
+							$this->attributes['gidNumber'][0] = $this->orig['gidNumber'][0];
+						}
+					}
+				}
+			}
+		}
+		if ($this->manageCnAndDescription($modules)) {
+			$this->attributes['cn'][0] = $_POST['cn'];
+			if (preg_match('/^[A-Z]+$/', $_POST['cn'])) {
+				$errors[] = $this->messages['cn'][0];
+			}
+			// Check if Groupname contains only valid characters
+			if (!get_preg($this->attributes['cn'][0],'groupname')) {
+				$errors[] = $this->messages['cn'][2];
+			}
+			// Create automatic useraccount with number if original user already exists
+			// Reset name to original name if new name is in use
+			// Set username back to original name if new group name is in use
+			if ($this->groupNameExists($this->attributes['cn'][0]) && ($this->orig['cn'][0] != '')) {
+				$this->attributes['cn'][0] = $this->orig['cn'][0];
+			}
+			// Change gid to a new gid until a free gid is found
+			else {
+				while ($this->groupNameExists($this->attributes['cn'][0])) {
+					// get last character of group name
+					$lastchar = substr($this->attributes['cn'][0], strlen($this->attributes['cn'][0])-1, 1);
+					// Last character is no number
+					if (!preg_match('/^([0-9])+$/', $lastchar)) {
+						/* Last character is no number. Therefore we only have to
+						* add "2" to it.
+						*/
+						$this->attributes['cn'][0] = $this->attributes['cn'][0] . '2';
+					}
+					else {
+						/* Last character is a number -> we have to increase the number until we've
+						* found a groupname with trailing number which is not in use.
+						*
+						* $i will show us were we have to split groupname so we get a part
+						* with the groupname and a part with the trailing number
+						*/
+						$i = strlen($this->attributes['cn'][0]) - 1;
+						// Set $i to the last character which is a number in $account_new->general_username
+						while (true) {
+							if (preg_match('/^([0-9])+$/',substr($this->attributes['cn'][0], $i, strlen($this->attributes['cn'][0]) - $i))) {
+								$i--;
+							}
+							else {
+								break;
+							}
+						}
+						// increase last number with one
+						$firstchars = substr($this->attributes['cn'][0], 0, $i+1);
+						$lastchars = substr($this->attributes['cn'][0], $i+1, strlen($this->attributes['cn'][0])-$i);
+						// Put username together
+						$this->attributes['cn'][0] = $firstchars . (intval($lastchars)+1);
+					}
+				}
+			}
+			// Show warning if lam has changed group name
+			if ($this->attributes['cn'][0] != $_POST['cn']) {
+				$errors[] = $this->messages['cn'][1];
+			}
+		}
+		// show info when gidnumber has changed
+		if (isset($this->orig['gidNumber'][0]) && ($this->orig['gidNumber'][0] != $this->attributes['gidNumber'][0])
+			&& ($this->orig['gidNumber'][0] != '') && !$this->changegids) {
+			$errors[] = $this->messages['gidNumber'][0];
+		}
+		// Return error-messages
+		return $errors;
+	}
+
+
+	/**
+	* Processes user input of the user selection page.
+	* It checks if all input values are correct and updates the associated LDAP attributes.
+	*
+	* @return array list of info/error messages
+	*/
+	function process_user() {
+		$return = array();
+		if (!isset($this->attributes['member'])) {
+			$this->attributes['member'] = array();
+		}
+		// add users
+		if (isset($_POST['addusers']) && isset($_POST['addusers_button'])) { // Add users to list
+			$this->attributes['member'] = @array_merge($this->attributes['member'], $_POST['addusers']);
+		}
+		// remove users
+		elseif (isset($_POST['removeusers']) && isset($_POST['removeusers_button'])) { // remove users from list
+			$this->attributes['member'] = array_delete($_POST['removeusers'], $this->attributes['member']);
+		}
+		// sync users
+		elseif (isset($_POST['syncGON'])) {
+			$return = array_merge($return, $this->syncGon());
+		}
+		// sync Windows
+		elseif (isset($_POST['syncWindows'])) {
+			$return = array_merge($return, $this->syncWindows());
+		}
+		return $return;
+	}
+
+	/**
+	 * Syncs with group of names members.
+	 *
+	 * @return array list of status messages
+	 */
+	protected function syncGon() {
+		$delete = isset($_POST['syncGON_delete']) && ($_POST['syncGON_delete'] == 'on');
+		$return = array();
+		$gon = $this->getAccountContainer()->getAccountModule('groupOfNames');
+		if ($gon == null) {
+			$gon = $this->getAccountContainer()->getAccountModule('groupOfUniqueNames');
+		}
+		if ($gon == null) {
+			return;
+		}
+		if (!isset($this->attributes['member'])) {
+			$this->attributes['member'] = array();
+		}
+		$memberDNs = $gon->getMembers();
+		$users = $this->getUsers();
+		$oldValues = $this->attributes['member'];
+		if ($delete) {
+			$this->attributes['member'] = array();
+		}
+		foreach ($memberDNs as $dn) {
+			foreach ($users as $userName => $userAttrs) {
+				if ($userAttrs['dn'] != $dn) {
+					continue;
+				}
+				$this->attributes['member'][] = $userName;
+			}
+		}
+		$added = array_delete($oldValues, $this->attributes['member']);
+		if (!empty($added)) {
+			$return[] = array('INFO', _('Added users'), htmlspecialchars(implode($added, ', ')));
+		}
+		if ($delete) {
+			$deleted = array_delete($this->attributes['member'], $oldValues);
+			if (!empty($deleted)) {
+				$return[] = array('INFO', _('Removed users'), htmlspecialchars(implode($deleted, ', ')));
+			}
+		}
+		return $return;
+	}
+
+	/**
+	 * Syncs with Windows.
+	 *
+	 * @return array list of status messages
+	 */
+	protected function syncWindows() {
+		$delete = isset($_POST['syncWindows_delete']) && ($_POST['syncWindows_delete'] == 'on');
+		$return = array();
+		$windows = $this->getAccountContainer()->getAccountModule('windowsGroup');
+		if (!isset($this->attributes['member'])) {
+			$this->attributes['member'] = array();
+		}
+		$windowsAttributes = $windows->getAttributes();
+		$memberDNs = array();
+		if (!empty($windowsAttributes['member'])) {
+			$memberDNs = $windowsAttributes['member'];
+		}
+		$users = $this->getUsers();
+		$oldValues = $this->attributes['member'];
+		if ($delete) {
+			$this->attributes['member'] = array();
+		}
+		foreach ($memberDNs as $dn) {
+			foreach ($users as $userName => $userAttrs) {
+				if ($userAttrs['dn'] != $dn) {
+					continue;
+				}
+				$this->attributes['member'][] = $userName;
+			}
+		}
+		$added = array_delete($oldValues, $this->attributes['member']);
+		if (!empty($added)) {
+			$return[] = array('INFO', _('Added users'), htmlspecialchars(implode($added, ', ')));
+		}
+		if ($delete) {
+			$deleted = array_delete($this->attributes['member'], $oldValues);
+			if (!empty($deleted)) {
+				$return[] = array('INFO', _('Removed users'), htmlspecialchars(implode($deleted, ', ')));
+			}
+		}
+		return $return;
+	}
+
+	/**
+	* Returns a list of modifications which have to be made to the LDAP account.
+	*
+	* @return array list of modifications
+	* <br>This function returns an array with 3 entries:
+	* <br>array( DN1 ('add' => array($attr), 'remove' => array($attr), 'modify' => array($attr)), DN2 .... )
+	* <br>DN is the DN to change. It may be possible to change several DNs (e.g. create a new user and add him to some groups via attribute memberUid)
+	* <br>"add" are attributes which have to be added to LDAP entry
+	* <br>"remove" are attributes which have to be removed from LDAP entry
+	* <br>"modify" are attributes which have to been modified in LDAP entry
+	* <br>"info" are values with informational value (e.g. to be used later by pre/postModify actions)
+	*/
+	function save_attributes() {
+		// skip saving if account is based on another structural object class
+		if ($this->is_base_module() && !$this->getAccountContainer()->isNewAccount && !in_array('groupOfNames', $this->getAccountContainer()->attributes_orig['objectClass'])) {
+			return array();
+		}
+		if (!in_array('groupOfNames', $this->attributes['objectClass']) && !in_array('groupOfNames', $this->orig['objectClass'])) {
+			// skip saving if the extension was not added/modified
+			return array();
+		}
+		// auto sync group members
+		$typeId = $this->getAccountContainer()->get_type()->getId();
+		if ($this->isBooleanConfigOptionSet('groupOfNames_autoSyncGon')) {
+			$this->syncGon();
+		}
+		$return = $this->getAccountContainer()->save_module_attributes($this->attributes, $this->orig);
+		// Change gids of users and hosts?
+		if ($this->changegids) {
+			// find all accounts to change
+			$result = searchLDAPByFilter('(&(objectClass=posixAccount)(gidNumber=' . $this->orig['gidNumber'][0] . '))', array('dn'), array('user', 'host'));
+			if (sizeof($result) > 0) {
+				for ($i = 0; $i < sizeof($result); $i++) {
+					$return[$result[$i]['dn']]['modify']['gidNumber'][0] = $this->attributes['gidNumber'][0];
+				}
+			}
+		}
+		return $return;
+	}
+
+	/**
+	* Loads the values of an account profile into internal variables.
+	*
+	* @param array $profile hash array with profile values (identifier => value)
+	*/
+	function load_profile($profile) {
+		// profile mappings in meta data
+		parent::load_profile($profile);
+		// add extension
+		if (isset($profile['groupOfNames_addExt'][0]) && ($profile['groupOfNames_addExt'][0] == "true")
+				&& !in_array('groupOfNames', $this->attributes['objectClass'])) {
+			$this->attributes['objectClass'][] = 'groupOfNames';
+		}
+	}
+
+	/**
+	* Returns one or more free GID numbers.
+	*
+	* @param integer $count Number of needed free GIDs.
+	* @param array $errors list of error messages where errors can be added
+	* @param ConfiguredType $type account type
+	* @return mixed Null if no GIDs are free else an array of free GIDs.
+	*/
+	function getNextGIDs($count, &$errors, $type) {
+		$typeId = $type->getId();
+		// check if UIDs should be taken from Samba pool entry
+		if (isset($this->moduleSettings['groupOfNames_' . $typeId . '_gidGenerator']) && ($this->moduleSettings['groupOfNames_' . $typeId . '_gidGenerator'][0] == 'sambaPool')) {
+			return $this->getNextSambaPoolGIDs($count, $errors, $typeId);
+		}
+		// check if UIDs should be taken from domain info entry
+		if (isset($this->moduleSettings['groupOfNames_' . $typeId . '_gidGenerator']) && ($this->moduleSettings['groupOfNames_' . $typeId . '_gidGenerator'][0] == 'windowsDomain')) {
+			return $this->getNextDomainInfoGIDs($count, $errors, $typeId);
+		}
+		// use magic number
+		if (isset($this->moduleSettings['groupOfNames_' . $typeId . '_gidGenerator']) && ($this->moduleSettings['groupOfNames_' . $typeId . '_gidGenerator'][0] == 'magicNumber')) {
+			$return = array();
+			for ($i = 0; $i < $count; $i++) {
+				$return[] = $this->moduleSettings['groupOfNames_' . $typeId . '_magicNumber'][0];
+			}
+			return $return;
+		}
+		$ret = array();
+		$minID = intval($this->moduleSettings['groupOfNames_' . $typeId . '_minGID'][0]);
+		$maxID = intval($this->moduleSettings['groupOfNames_' . $typeId . '_maxGID'][0]);
+		$gidList = $this->getGIDs($type);
+		$gids = array();
+		foreach ($gidList as $gid) {
+			if (($gid <= $maxID) && ($gid >= $minID)) {
+				$gids[] = $gid;  // ignore GIDs > maxID and GIDs < minID
+			}
+		}
+		for ($i = 0; $i < $count; $i++) {
+			if (count($gids) != 0) {
+				// there already are some GIDs
+				// store highest id-number
+				$id = $gids[count($gids)-1];
+				// Return minimum allowed id-number if all found id-numbers are too low
+				if ($id < $minID) {
+					$ret[] = $minID;
+					$gids[] = $minID;
+				}
+				// return highest used id-number + 1 if it's still in valid range
+				elseif ($id < $maxID) {
+					$ret[] = $id + 1;
+					$gids[] = $id + 1;
+				}
+				// find free numbers between existing ones
+				else {
+					$k = intval($minID);
+					while (in_array($k, $gids)) {
+						$k++;
+					}
+					if ($k > $maxID) {
+						return null;
+					}
+					else {
+						$ret[] = $k;
+						$gids[] = $k;
+						sort ($gids, SORT_NUMERIC);
+					}
+					// show warning message
+					$errors[] = $this->messages['gidNumber'][2];
+				}
+			}
+			else {
+				// return minimum allowed id-number if no id-numbers are found
+				$ret[] = $minID;
+				$gids[] = $minID;
+			}
+		}
+		return $ret;
+	}
+
+	/**
+	 * Gets the free GID numbers from an Samba pool entry in LDAP.
+	 *
+	 * @param integer $count number of needed free GIDs.
+	 * @param array $errors list of error messages where errors can be added
+	 * @param string $typeId account type id
+	 * @return mixed null if no GIDs are free else an array of free GIDs
+	 */
+	private function getNextSambaPoolGIDs($count, &$errors, $typeId) {
+		$dn = $this->moduleSettings['groupOfNames_' . $typeId . '_sambaIDPoolDN'][0];
+		$attrs = ldapGetDN($dn, array('gidNumber'));
+		if (isset($attrs['gidnumber'][0]) && ($attrs['gidnumber'][0] != '')) {
+			$newValue = $attrs['gidnumber'][0] + $count;
+			$ldapHandle = $_SESSION['ldap']->server();
+			ldap_modify($ldapHandle, $dn, array('gidnumber' => array($newValue)));
+			logNewMessage(LOG_DEBUG, 'Updated Samba ID pool ' . $dn . ' with GID number ' . $newValue . ' and LDAP code ' . ldap_errno($ldapHandle));
+			if (ldap_errno($ldapHandle) != 0) {
+				logNewMessage(LOG_NOTICE, 'Updating Samba ID pool ' . $dn . ' with GID number ' . $newValue . ' failed. ' . ldap_error($ldapHandle));
+				return null;
+			}
+			$result = array();
+			for ($i = 0; $i < $count; $i++) {
+				$result[] = $attrs['gidnumber'][0] + $i;
+			}
+			return $result;
+		}
+		return null;
+	}
+
+	/**
+	 * Gets the free GID numbers from an Windows domain info entry in LDAP.
+	 *
+	 * @param integer $count number of needed free GIDs.
+	 * @param array $errors list of error messages where errors can be added
+	 * @param string $typeId account type id
+	 * @return mixed null if no GIDs are free else an array of free GIDs
+	 */
+	private function getNextDomainInfoGIDs($count, &$errors, $typeId) {
+		$dn = $this->moduleSettings['groupOfNames_' . $typeId . '_windowsIDPoolDN'][0];
+		$attrs = ldapGetDN($dn, array('msSFU30MaxGidNumber'));
+		if (isset($attrs['mssfu30maxgidnumber'][0]) && ($attrs['mssfu30maxgidnumber'][0] != '')) {
+			$newValue = $attrs['mssfu30maxgidnumber'][0] + $count;
+			$ldapHandle = $_SESSION['ldap']->server();
+			ldap_modify($ldapHandle, $dn, array('mssfu30maxgidnumber' => array($newValue)));
+			logNewMessage(LOG_DEBUG, 'Updated domain info ' . $dn . ' with GID number ' . $newValue . ' and LDAP code ' . ldap_errno($ldapHandle));
+			if (ldap_errno($ldapHandle) != 0) {
+				logNewMessage(LOG_NOTICE, 'Updating domain info ' . $dn . ' with GID number ' . $newValue . ' failed. ' . ldap_error($ldapHandle));
+				return null;
+			}
+			$result = array();
+			for ($i = 0; $i < $count; $i++) {
+				$result[] = $attrs['mssfu30maxgidnumber'][0] + $i;
+			}
+			return $result;
+		}
+		return null;
+	}
+
+	/**
+	 * This method specifies if a module manages password attributes.
+	 * @see passwordService::managesPasswordAttributes
+	 *
+	 * @return boolean true if this module manages password attributes
+	 */
+	public function managesPasswordAttributes() {
+		return true;
+	}
+
+	/**
+	 * Specifies if this module supports to force that a user must change his password on next login.
+	 *
+	 * @return boolean force password change supported
+	 */
+	public function supportsForcePasswordChange() {
+		return false;
+	}
+
+	/**
+	 * This function is called whenever the password should be changed. Account modules
+	 * must change their password attributes only if the modules list contains their module name.
+	 *
+	 * @param String $password new password
+	 * @param $modules list of modules for which the password should be changed
+	 * @param boolean $forcePasswordChange force the user to change his password at next login
+	 * @return array list of error messages if any as parameter array for StatusMessage
+	 *               e.g. return arrray(array('ERROR', 'Password change failed.'))
+	 * @see passwordService::passwordChangeRequested
+	 */
+	public function passwordChangeRequested($password, $modules, $forcePasswordChange) {
+		if (!in_array(get_class($this), $modules)) {
+			return array();
+		}
+		$this->attributes[$this->passwordAttrName][0] = pwd_hash($password, true, $this->moduleSettings['posixAccount_pwdHash'][0]);
+		return array();
+	}
+
+	/**
+	 * Returns a list of existing GID numbers.
+	 *
+	 * @param ConfiguredType $type account type
+	 * @return array list of GID numbers
+	 */
+	private function getGIDs($type) {
+		if ($this->cachedGIDList != null) {
+			return $this->cachedGIDList;
+		}
+		$this->cachedGIDList = array();
+		$attrs = array('gidNumber');
+		$filter = '(&(objectClass=groupOfNames)(gidNumber=*))';
+		$suffix = $type->getSuffix();
+		$typeId = $type->getId();
+		if (!empty($this->moduleSettings['groupOfNames_' . $typeId . '_gidCheckSuffix'][0])) {
+			$suffix = $this->moduleSettings['groupOfNames_' . $typeId . '_gidCheckSuffix'][0];
+		}
+		$result = searchLDAP($suffix, $filter, $attrs);
+		for ($i = 0; $i < sizeof($result); $i++) {
+			$this->cachedGIDList[] = $result[$i]['gidnumber'][0];
+		}
+		sort($this->cachedGIDList, SORT_NUMERIC);
+		return $this->cachedGIDList;
+	}
+
+	/**
+	 * Returns a list of existing users and their GID numbers and cn.
+	 *
+	 * @return array list in format array(uid => array('gid' => 123, 'cn' => 'Some user'))
+	 */
+	protected function getUsers() {
+		if ($this->cachedUserToGIDList != null) {
+			return $this->cachedUserToGIDList;
+		}
+		$this->cachedUserToGIDList = array();
+		$typeManager = new TypeManager();
+		foreach ($typeManager->getConfiguredTypesForScope('user') as $type) {
+			$filter = '(&(objectClass=posixAccount)(gidNumber=*))';
+			if ($this->isWindows()) {
+				$filter = '(&(objectClass=user)(gidNumber=*))';
+			}
+			$typeFilter = $type->getAdditionalLdapFilter();
+			if (!empty($typeFilter)) {
+				if (strpos($typeFilter, '(') !== 0) {
+					$typeFilter = '(' . $typeFilter . ')';
+				}
+				$filter = '(&' . $filter . $typeFilter . ')';
+			}
+			$result = searchLDAPByFilter($filter, array('uid', 'gidNumber', 'cn'), array('user'));
+			$resultCount = sizeof($result);
+			for ($i = 0; $i < $resultCount; $i++) {
+				$this->cachedUserToGIDList[$result[$i]['uid'][0]] = array(
+					'gid' => $result[$i]['gidnumber'][0],
+					'cn' => $result[$i]['cn'][0],
+					'dn' => $result[$i]['dn']);
+			}
+		}
+		logNewMessage(LOG_DEBUG, 'Found ' . $resultCount . ' Unix users.');
+		logNewMessage(LOG_DEBUG, print_r($result, true));
+		return $this->cachedUserToGIDList;
+	}
+
+	/**
+	 * Checks if the given group name already exists in LDAP.
+	 *
+	 * @param String $groupName group name
+	 * @return boolean true if already exists
+	 */
+	private function groupNameExists($groupName) {
+		return in_array($groupName, $this->getGroupNames());
+	}
+
+	/**
+	 * Returns a list of all group names in LDAP.
+	 *
+	 * @return array group names
+	 */
+	private function getGroupNames() {
+		if ($this->cachedGroupNameList != null) {
+			return $this->cachedGroupNameList;
+		}
+		$this->cachedGroupNameList = array();
+		$attrs = array('cn');
+		$filter = '(&(objectClass=groupOfNames)(cn=*))';
+		$suffix = $this->getAccountContainer()->get_type()->getSuffix();
+		$typeId = $this->getAccountContainer()->get_type()->getId();
+		if (!empty($this->moduleSettings['groupOfNames_' . $typeId . '_gidCheckSuffix'][0])) {
+			$suffix = $this->moduleSettings['groupOfNames_' . $typeId . '_gidCheckSuffix'][0];
+		}
+		$result = searchLDAP($suffix, $filter, $attrs);
+		for ($i = 0; $i < sizeof($result); $i++) {
+			$this->cachedGroupNameList[] = $result[$i]['cn'][0];
+		}
+		return $this->cachedGroupNameList;
+	}
+
+	/**
+	 * Returns if the Windows module is active.
+	 *
+	 * @return boolean is Windows
+	 */
+	private function isWindows() {
+		return (in_array('windowsGroup', $this->getAccountContainer()->get_type()->getModules()));
+	}
+
+	/**
+	 * Returns if cn and description attributes should be managed.
+	 *
+	 * @param string[] $modules modules
+	 * @return boolean manage cn+description
+	 */
+	protected function manageCnAndDescription($modules) {
+		return true;
+	}
+
+}
+
+?>
