@@ -1,0 +1,4 @@
+dn: cn={2}nis,cn=schema,cn=config
+changetype: modify
+add: olcObjectClasses
+olcObjectClasses: {13}( 1.3.6.1.1.1.2.13 NAME 'customposixGroup' DESC 'Abstraction of a group of accounts' AUXILIARY MUST ( cn $ gidNumber ) MAY ( userPassword $ memberUid $ description $ member ) )
