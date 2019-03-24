@@ -267,7 +267,9 @@ class groupOfNames extends baseModule implements passwordService {
 							$members[] = $uid . ' (' . $users[$uid]['cn'] . ')';
 						}
 						else {
-							$members[] = $uid;
+							$userArray = explode(",",$uid);
+							parse_str($userArray[0]);
+							$members[] = $cn . ' (' . $cn . ')';
 						}
 					}
 				}
@@ -310,25 +312,11 @@ class groupOfNames extends baseModule implements passwordService {
 		$userAndGIDs = $this->getUsers();
 		$users = array();
 		foreach ($userAndGIDs as $user => $userAttrs) {
-			if (!in_array($user, $this->attributes['member'])) {
-				print_r($userAttrs);
+			if (!in_array($userAttrs[dn], $this->attributes['member'])) {
 				$display = $user . ' (' . $userAttrs['cn'] . ')';
-
-				if (!empty($filter) && !preg_match('/' . str_replace('*', '.*', $filter) . '/ui', $display)) {
-					continue;
-				}
-				if ($this->attributes['gidNumber'][0] == $userAttrs['gid']) {
-					if (isset($this->moduleSettings['posixAccount_primaryGroupAsSecondary'][0])
-						&& ($this->moduleSettings['posixAccount_primaryGroupAsSecondary'][0] == 'true')) {
-							$users[$display] = $userAttrs['dn'];
-					}
-				}
-				else {
-					$users[$display] = $userAttrs['dn'];
-				}
+				$users[$display] = $userAttrs['dn'];
 			}
 		}
-		print_r($users);
 		$return->addElement(new htmlSubTitle(_("Group members")), true);
 
 		$return->addElement(new htmlOutputText(_("Selected users")));
@@ -346,7 +334,10 @@ class groupOfNames extends baseModule implements passwordService {
 				$remUsersDescriptive[$user . ' (' . $userAndGIDs[$user]['cn'] . ')'] = $user;
 			}
 			else {
-				$remUsersDescriptive[$user] = $user;
+				$remUserArray = explode(",",$user);
+				parse_str($remUserArray[0]);
+				$display = $cn . ' (' . $cn . ')';
+				$remUsersDescriptive[$display] = $user;
 			}
 		}
 		$remSelect = new htmlSelect('removeusers', $remUsersDescriptive, null, 15);
