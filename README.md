@@ -6,7 +6,7 @@ for Groups, Samba 3 extension must be added or otherwise gidNumber will error ou
 
 the patch are use as it is and only test compatiblity with LAM 6.6-1
 
-put following files at /usr/share/ldap-account-manager/lib/modules
+Copy following files to /usr/share/ldap-account-manager/lib/modules
 
 ** groupOfNames.inc
 
@@ -15,5 +15,7 @@ put following files at /usr/share/ldap-account-manager/lib/modules
 ** posixAccount.inc
 
 ** sambaGroupMapping.inc
+
+copy group.inc to /usr/share/ldap-account-manager/lib/types
 
 Guides are self-contained html files, so just please download them
