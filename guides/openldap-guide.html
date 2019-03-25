@@ -2599,7 +2599,6 @@ ldapadd -Q -Y EXTERNAL -H ldapi:/// -f openldap.ldif;
 ldapadd -Q -Y EXTERNAL -H ldapi:/// -f ppolicy.ldif; 
 ldapadd -Q -Y EXTERNAL -H ldapi:/// -f ldapns.ldif; 
 ldapadd -Q -Y EXTERNAL -H ldapi:/// -f pmi.ldif; 
-ldapadd -Q -Y EXTERNAL -H ldapi:/// -f samba.ldif; 
 
 scp &lt;samba server&gt;:/usr/share/doc/samba/examples/LDAP/samba.ldif.gz /etc/ldap/schema/;
 
@@ -2677,8 +2676,8 @@ olcRefintAttribute: memberof member manager owner</code></pre>
 <pre id="bkmrk-ldapadd--y-external-"><code class="language-shell">ldapadd -Y EXTERNAL -H ldapi:/// -f module.ldif
 ldapadd -Y EXTERNAL -H ldapi:/// -f memberof.ldif
 ldapadd -Y EXTERNAL -H ldapi:/// -f refint.ldif</code></pre>
-<h5 id="bkmrk-inintial">Inintial</h5>
-<div id="bkmrk-initial-users-and-gr">Initial Users and Groups Databse -Create new_ldap.ldif</div>
+<h5 id="bkmrk-initialize">Initialize</h5>
+<div id="bkmrk-initial-users-and-gr">Initialize Users and Groups Databse -Create new_ldap.ldif</div>
 <pre id="bkmrk-dn%3A-ou%3Dusers%2Cdc%3Dexam"><code class="language-">dn: ou=Users,dc=example,dc=com
 objectClass: organizationalUnit
 ou: Users
