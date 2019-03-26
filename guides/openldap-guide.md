@@ -219,11 +219,11 @@ mv /tmp/vinas-ldap-intergration/*.inc  /usr/share/ldap-account-manager/lib/modul
 
 go to <http://(server’s hostname or IP address)/lam>   default password for profile and server config is lam.  Change all necessary password accordingly.
 
-![LAM config 1](images/lan-001.png?raw=true "LAM config 1")
+![LAM config 1](images/lam-001.png?raw=true "LAM config 1")
 
-![LAM config 2](images/lan-002.png?raw=true "LAM config 2")
+![LAM config 2](images/lam-002.png?raw=true "LAM config 2")
 
-![LAM config 3](images/lan-003.png?raw=true "LAM config 3")
+![LAM config 3](images/lam-003.png?raw=true "LAM config 3")
 
 ## Modules Section
 
