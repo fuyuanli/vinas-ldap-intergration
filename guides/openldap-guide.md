@@ -4,16 +4,19 @@
 
 Use Ubuntu 18.04 LXC template to create
 
+```shell
 systemctl stop ufw.service;
 systemctl disable ufw.service;
 apt update && apt upgrade;
 
 apt -y install slapd ldap-utils
+```
+
 During the installation, you’ll be prompted
 
-to set your base dn like dc=example,dc=com, change it to your desire domains.
+to set your base dn like `dc=example,dc=com`, change it to your desire domains.
 
-to set LDAP admin password, provide your desired password, then press [OK]
+to set LDAP `admin password`, provide your desired password, then press [OK]
 
 ![Install step 1](images/ldap-001.png?raw=true "Install step 1")
 
@@ -23,7 +26,7 @@ Confirm the password and continue installation by selecting [ok] with TAB key.
 
 ## Verify
 
-use slapcat to test sladp
+use `slapcat` to test sladp
 
 ```shell
  slapcat
@@ -81,7 +84,7 @@ zcat samba.ldif.gz | ldapadd -Q -Y EXTERNAL -H ldapi:///
 
 ## Indices
 
-Make sure default ldap database has correct olcDbIndex, below example are for user/group only not meant for address and etc
+Make sure default ldap database has correct `olcDbIndex`, below example are for user/group only not meant for address and etc
 
 ```shell
 cat '/etc/ldap/slapd.d/cn=config/olcDatabase={1}mdb.ldif'
@@ -115,7 +118,7 @@ modifiersName: cn=config
 modifyTimestamp: 20190307115143Z
 ```
 
-If database not correctly indexed, you need to use ldapmodify
+If database not correctly indexed, you need to use `ldapmodify`
 
 Content of newindex.ldif
 
@@ -217,7 +220,7 @@ mv /tmp/vinas-ldap-intergration/group.inc /usr/share/ldap-account-manager/lib/ty
 mv /tmp/vinas-ldap-intergration/*.inc  /usr/share/ldap-account-manager/lib/modules/;
 ```
 
-go to <http://(server’s hostname or IP address)/lam>   default password for profile and server config is lam.  Change all necessary password accordingly.
+go to  http://(server’s hostname or IP address)/lam  default password for profile and server config is `lam`.  Change all necessary password accordingly.
 
 ![LAM config 1](images/lam-001.png?raw=true "LAM config 1")
 
