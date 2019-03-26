@@ -1,3 +1,5 @@
+Please check Wiki for more detail
+
 modify lam package to support groupOfNames.
 
 It will make posixGroup unusable due to all reference to it are replaced or removed.
