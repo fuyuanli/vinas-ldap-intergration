@@ -2637,15 +2637,21 @@ modifyTimestamp: 20190307115143Z</code></pre>
 <p id="bkmrk-if-database-not-corr">If database not correctly indexed, you need to use <code>ldapmodify</code></p>
 <p id="bkmrk-content-of-newindex.">Content of newindex.ldif</p>
 <pre id="bkmrk-dn%3A-olcdatabase%3D%7B1%7Dm"><code class="language-">dn: olcDatabase={1}mdb,cn=config
-changetype: modify 
-add: olcDbIndex 
+changetype: modify
+replace: olcDbIndex
 olcDbIndex: objectClass eq
-add: olcDbIndex 
-olcDbIndex: cn,uid eq
-add: olcDbIndex 
 olcDbIndex: uidNumber,gidNumber eq
-add: olcDbIndex 
-olcDbIndex: member,memberUid eq</code></pre>
+olcDbIndex: loginShell eq
+olcDbIndex: uid,cn eq,sub
+olcDbIndex: memberUid eq,sub
+olcDbIndex: member,uniqueMember eq
+olcDbIndex: sambaSID eq
+olcDbIndex: sambaPrimaryGroupSID eq
+olcDbIndex: sambaGroupType eq
+olcDbIndex: sambaSIDList eq
+olcDbIndex: sambaDomainName eq
+olcDbIndex: default sub,eq
+olcDbIndex: displayName sub,eq</code></pre>
 <div id="bkmrk-ldapmodify%C2%A0-d%C2%A0%27cn%3D">
 <code>ldapmodify -D 'cn=config' -W -f newindex.ldif</code><code></code>
 </div>
