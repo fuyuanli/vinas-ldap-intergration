@@ -124,15 +124,21 @@ Content of newindex.ldif
 
 ```shell
 dn: olcDatabase={1}mdb,cn=config
-changetype: modify 
-add: olcDbIndex 
+changetype: modify
+replace: olcDbIndex
 olcDbIndex: objectClass eq
-add: olcDbIndex 
-olcDbIndex: cn,uid eq
-add: olcDbIndex 
 olcDbIndex: uidNumber,gidNumber eq
-add: olcDbIndex 
-olcDbIndex: member,memberUid eq
+olcDbIndex: loginShell eq
+olcDbIndex: uid,cn eq,sub
+olcDbIndex: memberUid eq,sub
+olcDbIndex: member,uniqueMember eq
+olcDbIndex: sambaSID eq
+olcDbIndex: sambaPrimaryGroupSID eq
+olcDbIndex: sambaGroupType eq
+olcDbIndex: sambaSIDList eq
+olcDbIndex: sambaDomainName eq
+olcDbIndex: default sub,eq
+olcDbIndex: displayName sub,eq
 ```
 
 ```shell
