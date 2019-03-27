@@ -215,7 +215,7 @@ systemctl reload apache2;
 apt -y install ldap-account-manager; #solve all dependancy;
 
 wget https://nchc.dl.sourceforge.net/project/lam/LAM/6.7/ldap-account-manager_6.7-1_all.deb;  #or the latest version;
-dpkg -i ldap-account-manager_6.6-1_all.deb;
+dpkg -i ldap-account-manager_6.7-1_all.deb;
 apt --fix-broken install;
 
 systemctl restart apache2;
