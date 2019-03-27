@@ -202,13 +202,13 @@ slapadd -b "dc=example,dc=com" -v -l new_ldap.ldif
 ## Install and setup LAM
 
 ```shell
-apt -y install apache2 php php-cgi libapache2-mod-php php-mbstring php-common php-pear git;
+apt -y install apache2 php php-cgi libapache2-mod-php php-mbstring php-common php-pear php-monolog php-psr-log git;
 a2enconf php7.2-cgi;
 systemctl reload apache2;
 
 apt -y install ldap-account-manager; #solve all dependancy;
 
-wget https://nchc.dl.sourceforge.net/project/lam/LAM/6.6/ldap-account-manager_6.6-1_all.deb;  #or the latest version;
+wget https://nchc.dl.sourceforge.net/project/lam/LAM/6.7/ldap-account-manager_6.7-1_all.deb;  #or the latest version;
 dpkg -i ldap-account-manager_6.6-1_all.deb;
 apt --fix-broken install;
 
