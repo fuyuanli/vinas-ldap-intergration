@@ -142,7 +142,7 @@ olcDbIndex: displayName sub,eq
 ```
 
 ```shell
-ldapmodify -D 'cn=config' -W -f newindex.ldif
+ldapmodify -Q -Y EXTERNAL -H ldapi:/// -f newindex.ldif
 ```
 
 module.ldif
