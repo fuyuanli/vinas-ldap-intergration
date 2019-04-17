@@ -224,6 +224,7 @@ cd /tmp/;
 git clone https://github.com/fuyuanli/vinas-ldap-intergration.git;
 mv /tmp/vinas-ldap-intergration/user.inc /usr/share/ldap-account-manager/lib/types/;
 mv /tmp/vinas-ldap-intergration/group.inc /usr/share/ldap-account-manager/lib/types/;
+mv /tmp/vinas-ldap-intergration/user.inc /usr/share/ldap-account-manager/lib/types/;
 mv /tmp/vinas-ldap-intergration/*.inc  /usr/share/ldap-account-manager/lib/modules/;
 ```
 
