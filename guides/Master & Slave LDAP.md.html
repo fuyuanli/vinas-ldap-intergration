@@ -1,0 +1,223 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><title>Master & Slave LDAP.md</title><style></style></head><body id="preview">
+<h1><a id="Master__Slave_LDAP_0"></a>Master &amp; Slave LDAP</h1>
+<h3><a id="1LDAP_Setup_2"></a>(1)LDAP Setup</h3>
+<p>Use Ubuntu 18.04 LXC template to create</p>
+<pre><code class="language-sh">systemctl stop ufw.service;
+systemctl <span class="hljs-built_in">disable</span> ufw.service;
+apt update &amp;&amp; apt upgrade;
+apt -y install slapd ldap-utils
+</code></pre>
+<p>During the installation, you’ll be prompted<br>
+to set your base dn like dc=example,dc=com,<br>
+If you want to change your base dn, use <code>dpkg-reconfigure slapd</code> to change it.<br>
+But remember configeration LDAP use MDB.</p>
+<p>to set LDAP admin password, provide your desired password, then press [OK]<br>
+<img src="https://github.com/fuyuanli/vinas-ldap-intergration/raw/master/guides/images/ldap-001.png?raw=true" alt="N|Solid"></p>
+<p>Confirm the password and continue installation by selecting [ok] with TAB key.<br>
+<img src="https://github.com/fuyuanli/vinas-ldap-intergration/raw/master/guides/images/ldap-002.png?raw=true" alt="N|Solid"></p>
+<h3><a id="2Verify_23"></a>(2)Verify</h3>
+<p>use <code>slapcat</code> to test sladp</p>
+<pre><code>dn: dc=example,dc=com
+objectClass: top
+objectClass: dcObject
+objectClass: organization
+o: example.com
+dc: example
+structuralObjectClass: organization
+entryUUID: xxxxxxx-689b-1038-8d53-cd4ea0a9f2fa
+creatorsName: cn=admin,dc=example,dc=com
+createTimestamp: 20190320100850Z
+entryCSN: 20190320100850.169668Z#000000#000#000000
+modifiersName: cn=admin,dc=example,dc=com
+modifyTimestamp: 20190320100850Z
+
+dn: cn=admin,dc=example,dc=com
+objectClass: simpleSecurityObject
+objectClass: organizationalRole
+cn: admin
+description: LDAP administrator
+userPassword:: &lt;ssha encrypted password&gt;
+structuralObjectClass: organizationalRole
+entryUUID: e29b65e4-689b-1038-8d54-cd4ea0a9f2fa
+creatorsName: cn=admin,dc=example,dc=com
+createTimestamp: 20190320100850Z
+entryCSN: 20190320100850.185122Z#000000#000#000000
+modifiersName: cn=admin,dc=example,dc=com
+modifyTimestamp: 20190320100850Z
+</code></pre>
+<h3><a id="3Begin_add_schema_56"></a>(3)Begin add schema</h3>
+<pre><code>cd /etc/ldap/schema
+
+ldapadd -Q -Y EXTERNAL -H ldapi:/// -f collective.ldif;
+ldapadd -Q -Y EXTERNAL -H ldapi:/// -f corba.ldif; 
+ldapadd -Q -Y EXTERNAL -H ldapi:/// -f cosine.ldif; 
+ldapadd -Q -Y EXTERNAL -H ldapi:/// -f duaconf.ldif; 
+ldapadd -Q -Y EXTERNAL -H ldapi:/// -f dyngroup.ldif; 
+ldapadd -Q -Y EXTERNAL -H ldapi:/// -f java.ldif; 
+ldapadd -Q -Y EXTERNAL -H ldapi:/// -f misc.ldif; 
+ldapadd -Q -Y EXTERNAL -H ldapi:/// -f openldap.ldif; 
+ldapadd -Q -Y EXTERNAL -H ldapi:/// -f ppolicy.ldif; 
+ldapadd -Q -Y EXTERNAL -H ldapi:/// -f ldapns.ldif; 
+ldapadd -Q -Y EXTERNAL -H ldapi:/// -f pmi.ldif; 
+
+scp &lt;samba server&gt;:/usr/share/doc/samba/examples/LDAP/samba.ldif.gz /etc/ldap/schema/;
+
+zcat samba.ldif.gz | ldapadd -Q -Y EXTERNAL -H ldapi:///
+</code></pre>
+<h3><a id="4Indices_77"></a>(4)Indices</h3>
+<p>Make sure default ldap database has correct <code>olcDbIndex</code>, below example are for user/group only not meant for address and etc</p>
+<pre><code>cat '/etc/ldap/slapd.d/cn=config/olcDatabase={1}mdb.ldif'
+
+# AUTO-GENERATED FILE - DO NOT EDIT!! Use ldapmodify.
+# CRC32 2dd0e81c
+dn: olcDatabase={1}mdb
+objectClass: olcDatabaseConfig
+objectClass: olcMdbConfig
+olcDatabase: {1}mdb
+olcDbDirectory: /var/lib/ldap
+olcSuffix: dc=example,dc=com
+olcAccess: {0}to attrs=userPassword by self write by anonymous auth by * none
+olcAccess: {1}to attrs=shadowLastChange by self write by * read
+olcAccess: {2}to * by * read
+olcLastMod: TRUE
+olcRootDN: cn=admin,dc=example,dc=com
+olcRootPW:: &lt;ssha encrypted password&gt;
+olcDbCheckpoint: 512 30
+olcDbIndex: objectClass eq
+olcDbIndex: cn,uid eq
+olcDbIndex: uidNumber,gidNumber eq
+olcDbIndex: member,memberUid eq
+olcDbMaxSize: 1073741824
+structuralObjectClass: olcMdbConfig
+entryUUID: 3d6fde1e-76cf-1038-8f2b-3f4c412963b8
+creatorsName: cn=config
+createTimestamp: 20181107115143Z
+entryCSN: 20190307115143.184607Z#000000#000#000000
+modifiersName: cn=config
+modifyTimestamp: 20190307115143Z
+</code></pre>
+<p>If database not correctly indexed, you need to use <code>ldapmodify</code></p>
+<pre><code>Content of newindex.ldif
+dn: olcDatabase={1}mdb,cn=config
+changetype: modify
+replace: olcDbIndex
+olcDbIndex: objectClass eq
+olcDbIndex: uidNumber,gidNumber eq
+olcDbIndex: loginShell eq
+olcDbIndex: uid,cn eq,sub
+olcDbIndex: memberUid eq,sub
+olcDbIndex: member,uniqueMember eq
+olcDbIndex: sambaSID eq
+olcDbIndex: sambaPrimaryGroupSID eq
+olcDbIndex: sambaGroupType eq
+olcDbIndex: sambaSIDList eq
+olcDbIndex: sambaDomainName eq
+olcDbIndex: default sub,eq
+olcDbIndex: displayName sub,eq
+</code></pre>
+<p><code>ldapmodify -Q -Y EXTERNAL -H ldapi:/// -f newindex.ldif</code></p>
+<h3><a id="5Configure_Master_LDAP_135"></a>(5)Configure Master LDAP</h3>
+<p>At master LDAP, use this module.ldif</p>
+<pre><code>dn: cn=module,cn=config
+objectClass: olcModuleList
+cn: module
+olcModulepath: /usr/lib/ldap
+olcModuleload: memberof.la
+olcModuleload: refint.la
+olcModuleLoad: syncprov.la
+</code></pre>
+<p>memberof.ldif</p>
+<pre><code>dn: olcOverlay={0}memberof,olcDatabase={1}mdb,cn=config
+objectClass: olcConfig
+objectClass: olcMemberOf
+objectClass: olcOverlayConfig
+objectClass: top
+olcOverlay: memberof
+</code></pre>
+<p>refint.ldif</p>
+<pre><code>dn: olcOverlay={1}refint,olcDatabase={1}mdb,cn=config
+objectClass: olcConfig
+objectClass: olcOverlayConfig
+objectClass: olcRefintConfig
+objectClass: top
+olcOverlay: {1}refint
+olcRefintAttribute: memberof member manager owner
+</code></pre>
+<p>syncprov.ldif</p>
+<pre><code>dn: olcOverlay=syncprov,olcDatabase={1}mdb,cn=config
+objectClass: olcOverlayConfig
+objectClass: olcSyncProvConfig
+olcOverlay: {2}syncprov
+olcSpSessionLog: 100
+</code></pre>
+<p>add configuration at Master LDAP</p>
+<pre><code>ldapadd -Y EXTERNAL -H ldapi:/// -f module.ldif
+ldapadd -Y EXTERNAL -H ldapi:/// -f memberof.ldif
+ldapadd -Y EXTERNAL -H ldapi:/// -f refint.ldif
+ldapadd -Y EXTERNAL -H ldapi:/// -f syncprov.ldif
+</code></pre>
+<h3><a id="6Configure_Slave_LDAP_185"></a>(6)Configure Slave LDAP</h3>
+<p>At Slave LDAP, use this module.ldif</p>
+<pre><code>dn: cn=module,cn=config
+objectClass: olcModuleList
+cn: module
+olcModulepath: /usr/lib/ldap
+olcModuleload: memberof.la
+olcModuleload: refint.la
+</code></pre>
+<p>rp.ldif</p>
+<pre><code>dn: olcDatabase={1}mdb,cn=config
+changetype: modify
+add: olcSyncRepl
+olcSyncRepl: rid=001                      # If you have muite slave,rid cannot be the same 
+provider=ldap://master.example.com:389/   # Change to master domain or ip address 
+bindmethod=simple
+binddn=&quot;cn=admin,dc=example,dc=com&quot;
+credentials=password                      # Change to master LDAP admin password
+searchbase=&quot;dc=example,dc=com &quot;
+scope=sub
+schemachecking=on
+type=refreshAndPersist
+retry=&quot;30 5 300 3&quot;
+interval=00:00:05:00
+</code></pre>
+<p><code>ldapadd -Y EXTERNAL -H ldapi:/// -f rp.ldif</code></p>
+<h3><a id="7Initialize_at_Master_LDAP_216"></a>(7)Initialize at Master LDAP</h3>
+<p>Initialize Users and Groups Databse -Create new_ldap.ldif</p>
+<pre><code>dn: ou=Users,dc=example,dc=com
+objectClass: organizationalUnit
+ou: Users
+
+dn: ou=Groups,dc=example,dc=com
+objectClass: organizationalUnit
+ou: Groups
+</code></pre>
+<p><code>slapadd -b &quot;dc=example,dc=com&quot; -v -l new_ldap.ldif</code></p>
+<h3><a id="8Check_Slave_LDAP_229"></a>(8)Check Slave LDAP</h3>
+<p>Use this command to check slave Ldap have <code>ou=Users</code> and <code>ou=Groups</code></p>
+<p><code>ldapsearch -x -b dc=example,dc=com</code></p>
+<h3><a id="9Install_and_setup_LAM_233"></a>(9)Install and setup LAM</h3>
+<pre><code>apt -y install apache2 php php-cgi libapache2-mod-php php-mbstring php-common php-pear php-monolog php-psr-log git;
+a2enconf php7.2-cgi;
+systemctl reload apache2;
+
+apt -y install ldap-account-manager; #solve all dependancy;
+
+wget https://nchc.dl.sourceforge.net/project/lam/LAM/6.7/ldap-account-manager_6.7-1_all.deb;  #or the latest version;
+dpkg -i ldap-account-manager_6.7-1_all.deb;
+apt --fix-broken install;
+
+systemctl restart apache2;
+
+cd /tmp/;
+git clone https://github.com/fuyuanli/vinas-ldap-intergration.git;
+mv /tmp/vinas-ldap-intergration/group.inc /usr/share/ldap-account-manager/lib/types/;
+mv /tmp/vinas-ldap-intergration/user.inc /usr/share/ldap-account-manager/lib/types/;
+mv /tmp/vinas-ldap-intergration/*.inc  /usr/share/ldap-account-manager/lib/modules/;
+</code></pre>
+<p>This is steps to Configure Master LDAP:<br>
+Use this guide (1),(2),(3),(4),(5),(7),(9)</p>
+<p>This is steps to Configure Slave LDAP:<br>
+Use this guide (1),(2),(3),(4),(6),(8),(9)</p>
+
+</body></html>
